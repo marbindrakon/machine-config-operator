@@ -172,6 +172,13 @@ contents:
           connection.autoconnect-priority 100 802-3-ethernet.mtu ${iface_mtu} ${extra_phys_args}
       fi
 
+      # Move any bond member interfaces to the new ovs-if-phys0 connection
+      if [ "$(nmcli --get-values connection.type conn show ${old_conn})" == "bond" ]; then
+        new_conn=$(grep uuid= $NM_CONN_PATH/ovs-if-phys0.nmconnection | sed s/uuid=//)
+        sed -i s/master=${old_conn}/master=${new_conn}/ $NM_CONN_PATH/*.nmconnection
+        nmcli conn reload
+      fi
+
       nmcli conn up ovs-if-phys0
 
       if ! nmcli connection show ovs-if-br-ex &> /dev/null; then
@@ -274,6 +281,12 @@ contents:
       echo "ERROR: Failed to activate ovs-if-br-ex NM connection"
       # if we made it here networking isnt coming up, revert for debugging
       set +e
+      # Revert changes to bond master interface
+      if [ "$(nmcli --get-values connection.type conn show ${old_conn})" == "bond" ]; then
+        new_conn=$(grep uuid= $NM_CONN_PATH/ovs-if-phys0.nmconnection | sed s/uuid=//)
+        sed -i s/master=${new_conn}/master=${old_conn}/ $NM_CONN_PATH/*.nmconnection
+        nmcli conn reload
+      fi
       nmcli conn down ovs-if-br-ex
       nmcli conn down ovs-if-phys0
       nmcli conn up $old_conn
@@ -288,6 +301,34 @@ contents:
       fi
 
       if nmcli connection show ovs-if-phys0 &> /dev/null; then
+
+      # Revert changes to bond member interfaces
+      if [ "$(nmcli --get-values connection.type conn show ovs-if-phys0)" == "bond" ]; then
+        if [ -d "/etc/NetworkManager/system-connections-merged" ]; then
+          NM_CONN_PATH="/etc/NetworkManager/system-connections-merged"
+        else
+          NM_CONN_PATH="/etc/NetworkManager/system-connections"
+        fi
+        new_conn=$(grep uuid= $NM_CONN_PATH/ovs-if-phys0.nmconnection | sed s/uuid=//)
+        old_conn_device=$(nmcli --get-values connection.interface-name connection show ovs-if-phys0)
+        # Attempt to determine old connection's UUID
+        old_conn=""
+        candidate_bonds=$(nmcli --get-values NAME,TYPE connection show | grep bond | grep -v ovs-if-phys0 | awk -F: '{ print $1; }')
+        for candidate in $candidate_bonds; do
+          if [ "$(nmcli --get-values connection.interface-name connection show $candidate)" == "$old_conn_device" ]; then
+            old_conn="$(nmcli --get-values connection.uuid connection show $candidate)"
+          fi
+        done
+        if [[ -n "$old_conn" ]]; then
+          # Reset bond members based on discovered old connection UUID
+          sed -i s/master=${new_conn}/master=${old_conn}/ $NM_CONN_PATH/*.nmconnection
+        else
+          # Reset bond members based on old device name as a last resort
+          sed -i s/master=${new_conn}/master=${old_conn_device}/ $NM_CONN_PATH/*.nmconnection
+        fi
+        nmcli conn reload
+      fi
+       
         nmcli c del ovs-if-phys0
       fi
 
